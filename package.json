@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-washington-code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Revised Code of Washington (RCW) — state statutes by citation.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-98c76f5e8060bc444d426ada5e55199a81b5c8f755e7c1b3137d12903705c9e6",
-    "sourceCommit": "b0fb3c31386cf0256dcf1e2f1b3440435a87ec35"
+    "sourceHash": "v1-38033fb3b4bbe8c206444576889215d82e9512696e1a172f1a3a718d52472d00",
+    "sourceCommit": "2cb50b368da3267446f2b6f6a3ddbd3d0eed3d73"
   }
 }
