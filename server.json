@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pipeworx-io/washington-code",
   "title": "Washington Code",
-  "description": "Revised Code of Washington (RCW) — state statutes by citation.",
-  "version": "0.1.2",
+  "description": "Washington state law: the Revised Code of Washington (RCW, statutes) and the",
+  "version": "0.1.3",
   "websiteUrl": "https://pipeworx.io/packs/washington-code",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-washington-code",

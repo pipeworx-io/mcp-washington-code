@@ -671,21 +671,35 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 /**
- * Revised Code of Washington (RCW) — state statutes by citation.
+ * Washington state law: the Revised Code of Washington (RCW, statutes) and the
+ * Washington Administrative Code (WAC, agency rules).
  *
- *   app.leg.wa.gov/RCW/default.aspx?cite=9A.32.030
+ *   RCW:  app.leg.wa.gov/RCW/default.aspx?cite=9A.32.030
+ *   WAC:  app.leg.wa.gov/WAC/default.aspx?cite=296-800-110
+ *         app.leg.wa.gov/WAC/registerfiling.aspx?cite=296-800-110   (WSR filings)
+ *         lawfilesext.leg.wa.gov/law/wacarchive/<year>/...            (annual archive)
+ *         lh112524p.searchunify.com/search/searchResultByPost         (the
+ *         Legislature's own full-text search; leg.wa.gov/search is a thin
+ *         client over it)
  *
- * Washington is the one state of the four whose miss page says what it is:
+ * Washington is the one state of the four whose RCW miss page says what it is:
  * a nonexistent citation renders a panel with the id
  * `ContentPlaceHolder1_pnlCitationNotFound`. It still answers HTTP 200 — every
  * state source does — but the markup admits the miss instead of leaving it to
- * be inferred, so the detection here keys on that panel directly rather than
+ * be inferred, so the detection there keys on that panel directly rather than
  * on the absence of content.
  *
- * Checking for the not-found panel is strictly better than checking for the
- * presence of text: if the page layout changes and content moves, an
- * absence-based check silently starts reporting "no such statute" for real
- * ones. A positive miss signal cannot fail that way.
+ * The WAC side is different and better: a nonexistent WAC section answers an
+ * HTTP 302 to the chapter's dispositions page (`?dispo=true&cite=296-800`),
+ * so the miss is read from the status line with `redirect: 'manual'`. A
+ * positive miss signal cannot fail the way an absence check does.
+ *
+ * WAC archive filenames are FIXED-WIDTH (measured 2026-10-07): the title is
+ * right-aligned to 3 characters then padded to 4, the chapter the same, and
+ * the section is appended as typed — so 296-800-110 is
+ * `WAC 296 -800 -110.htm` and 1-04-010 is `WAC   1 - 04 -010.htm`. The tree
+ * is nested by title for 2019–2023 and flat by chapter for 2024 onward; the
+ * resolver tries both. Years before 2019 are PDF-only.
  */
 
 
@@ -693,23 +707,48 @@ function collapse(s: string): string {
 // degrades without erroring would otherwise hold the Worker in `await fetch()`
 // until its own execution budget kills the request (minutes, not seconds).
 // Mirrors the epoFetch / usaspending retryFetch pattern (fleet #685).
-async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetchWithTimeout(url, init ?? {}, 'Revised Code of Washington');
+async function pwFetch(url: string | URL, init?: RequestInit, name = 'Washington State Legislature'): Promise<Response> {
+  return fetchWithTimeout(url, init ?? {}, name);
 }
 
-const BASE = 'https://app.leg.wa.gov/RCW/default.aspx?cite=';
+const RCW_BASE = 'https://app.leg.wa.gov/RCW/default.aspx?cite=';
+const WAC_BASE = 'https://app.leg.wa.gov/WAC/default.aspx?cite=';
+const WAC_HOME = 'https://app.leg.wa.gov/WAC/';
+const WAC_FILINGS = 'https://app.leg.wa.gov/WAC/registerfiling.aspx?cite=';
+const WAC_ARCHIVE = 'https://lawfilesext.leg.wa.gov/law/wacarchive/';
 const UA = 'pipeworx-mcp-washington-code/1.0 (+https://pipeworx.io)';
 const NOT_FOUND_PANEL = 'pnlCitationNotFound';
 
+// The Legislature's site search (leg.wa.gov/search) is a SearchUnify client.
+// Its instance host, client uid and the public per-client access token are
+// served to every anonymous visitor inside the client bundle (an.js), so they
+// are configuration we read, not a credential we hold. The token is cached
+// here and refreshed from the bundle once if the search API rejects it.
+const SU_CLIENT_JS =
+  'https://d3k6i4as5v4q0x.cloudfront.net/f42a2cde54e7a32e4c14c23c3832a714/search-clients/0b1bb940-dbe3-11f0-ae0e-0242ac120005/an.js';
+let suConfig = {
+  search: 'https://lh112524p.searchunify.com',
+  uid: '0b1bb940-dbe3-11f0-ae0e-0242ac120005',
+  accessToken: '9ad5ad4164aea64521fd3c00a19b76c8',
+};
+
+const SOURCE = 'Washington State Legislature (app.leg.wa.gov / lawfilesext.leg.wa.gov), keyless';
+const ATTRIBUTION = 'Washington statutes and agency rules are public record.';
+
 function toText(html: string): string {
   return html
+    .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<\/?(p|div|br|tr|li|h[1-6])\b[^>]*>/gi, '\n')
+    .replace(/<\/?(p|div|br|tr|li|h[1-6]|table)\b[^>]*>/gi, '\n')
+    .replace(/<\/t[dh]>/gi, ' ')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
     .replace(/&[a-z]+;/gi, ' ')
     .replace(/[ \t]+/g, ' ')
     .replace(/ *\n */g, '\n')
@@ -717,35 +756,59 @@ function toText(html: string): string {
     .trim();
 }
 
-const tools: McpToolExport['tools'] = [
-  {
-    name: 'wa_rcw_section',
-    description:
-      'Get the FULL TEXT of a section of the Revised Code of Washington (RCW) — Washington state statutes — by citation. "RCW 9A.32.030" is first degree murder. Returns the statutory text and its heading. Keyless. Use for "what does RCW 46.61.502 say", "text of RCW 49.60.180", or to check a Washington statute a case relies on.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        section: { type: 'string', description: 'RCW citation, e.g. "9A.32.030" or "46.61.502". Title.chapter.section.' },
-      },
-      required: ['section'],
-    },
-  },
-];
+function inline(html: string): string {
+  return toText(html).replace(/\s*\n\s*/g, ' ').trim();
+}
 
-async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-  if (name !== 'wa_rcw_section') throw new Error(`Unknown tool: ${name}`);
+// ---------------------------------------------------------------------------
+// WAC citation parsing
+// ---------------------------------------------------------------------------
 
+type WacCite = { title: string; chapter?: string; section?: string };
+
+/** "WAC 296-800-110", "296-800-110", "296‑800‑110", "296.800.110", "296-800", "296". */
+function parseWac(raw: unknown): WacCite | null {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/^WAC\s*/i, '')
+    .replace(/[‐-―−]/g, '-') // typographic dashes
+    .replace(/\s+/g, '')
+    .toUpperCase();
+  const m = s.match(/^(\d{1,3}[A-Z]?)(?:[-.](\d{1,3}[A-Z]?)(?:[-.](\d{3,6}[A-Z]?))?)?$/);
+  if (!m) return null;
+  const out: WacCite = { title: m[1] };
+  if (m[2]) out.chapter = m[2];
+  if (m[3]) out.section = m[3];
+  return out;
+}
+
+function citeString(c: WacCite): string {
+  return [c.title, c.chapter, c.section].filter(Boolean).join('-');
+}
+
+const WAC_FORMAT_HINT =
+  'WAC citations are title-chapter-section, e.g. "296-800-110" (safe workplace summary) or "458-20-178" (use tax). A title or chapter alone ("296", "296-800") is for wa_wac_browse.';
+
+// ---------------------------------------------------------------------------
+// RCW (unchanged behaviour)
+// ---------------------------------------------------------------------------
+
+async function rcwSection(args: Record<string, unknown>): Promise<unknown> {
   const raw = String(args.section ?? '').trim().replace(/\s+/g, '').replace(/^RCW/i, '');
   if (!/^\d+[A-Za-z]?\.\d+[A-Za-z]?\.\d+$/.test(raw)) {
+    const wac = parseWac(args.section);
     return {
       found: false,
       reason: 'unparsed_section',
       message: `"${args.section}" is not an RCW citation.`,
-      hint: 'RCW citations are title.chapter.section, e.g. "9A.32.030" (murder 1) or "46.61.502" (DUI).',
+      hint:
+        wac && wac.section
+          ? `"${citeString(wac)}" looks like a WAC (Washington Administrative Code) citation — call wa_wac_section for agency rules. RCW citations are title.chapter.section, e.g. "9A.32.030".`
+          : 'RCW citations are title.chapter.section, e.g. "9A.32.030" (murder 1) or "46.61.502" (DUI). For agency rules (WAC, title-chapter-section like 296-800-110) use wa_wac_section.',
     };
   }
 
-  const url = `${BASE}${encodeURIComponent(raw)}`;
+  const url = `${RCW_BASE}${encodeURIComponent(raw)}`;
   const res = await pwFetch(url, { headers: { 'User-Agent': UA } });
   if (!res.ok) throw new Error(`Washington Legislature returned HTTP ${res.status} for ${raw}`);
   const html = await res.text();
@@ -782,6 +845,586 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     source: 'Washington State Legislature (app.leg.wa.gov), keyless',
     attribution: 'Washington statutes are public record.',
   };
+}
+
+// ---------------------------------------------------------------------------
+// WAC: current section text
+// ---------------------------------------------------------------------------
+
+/** Split "[Statutory Authority: ... WSR 18-22-116, § 296-800-110, filed 11/6/18 ...]" off the end of a section body. */
+function splitHistory(body: string): { text: string; history: string | null; authority_rcw: string[] } {
+  const m = body.match(/\[\s*(Statutory Authority[\s\S]*?)\]\s*$/);
+  if (!m) return { text: body.trim(), history: null, authority_rcw: [] };
+  const history = m[1].replace(/\s+/g, ' ').trim();
+  const text = body.slice(0, m.index).trim();
+  const authority_rcw = Array.from(new Set(history.match(/\b\d+[A-Z]?\.\d+[A-Z]?\.\d+\b/g) ?? []));
+  return { text, history, authority_rcw };
+}
+
+function fieldOf(html: string, field: string): string | null {
+  const m = html.match(new RegExp(`<!-- field: ${field} -->([\\s\\S]*?)<!-- field: -->`));
+  return m ? inline(m[1]) : null;
+}
+
+async function wacSection(args: Record<string, unknown>): Promise<unknown> {
+  const cite = parseWac(args.section);
+  if (!cite) {
+    return { found: false, reason: 'unparsed_section', message: `"${args.section}" is not a WAC citation.`, hint: WAC_FORMAT_HINT };
+  }
+  if (!cite.section) {
+    return {
+      found: false,
+      reason: 'not_a_section',
+      citation: `WAC ${citeString(cite)}`,
+      message: `"${citeString(cite)}" is a ${cite.chapter ? 'chapter' : 'title'}, not a section. Call wa_wac_browse({cite: "${citeString(cite)}"}) to list what it contains.`,
+      hint: WAC_FORMAT_HINT,
+    };
+  }
+  const id = citeString(cite);
+  const url = `${WAC_BASE}${encodeURIComponent(id)}`;
+  const res = await pwFetch(url, { headers: { 'User-Agent': UA }, redirect: 'manual' });
+
+  // Positive miss signal: a nonexistent section is answered with a 302 to the
+  // chapter's dispositions page, not a 200 with an apology in the body.
+  if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get('location') ?? '';
+    return {
+      found: false,
+      reason: 'section_not_found',
+      section: id,
+      message: `No current WAC ${id}. The Washington site redirects the citation to the chapter dispositions page instead of serving a section (HTTP ${res.status} → ${location || 'no Location'}).`,
+      hint: `WAC numbers are not contiguous — repealed and recodified sections are normal. wa_wac_browse({cite: "${cite.title}-${cite.chapter}"}) lists the sections that do exist; wa_wac_archived_section can retrieve a repealed section from an earlier year's archive.`,
+      dispositions_url: location ? new URL(location, WAC_BASE).toString() : null,
+    };
+  }
+  if (!res.ok) throw new Error(`Washington Legislature returned HTTP ${res.status} for WAC ${id}`);
+  const html = await res.text();
+
+  const h1 = html.match(/<h1>([\s\S]*?)<\/h1>/);
+  const h2 = html.match(/<h2>([\s\S]*?)<\/h2>/);
+  const citation = h1 ? inline(h1[1]) : `WAC ${id}`;
+  const caption = h2 ? inline(h2[1]) : null;
+
+  const start = html.indexOf("<div id='contentWrapper'");
+  const end = html.indexOf('ContentPlaceHolder1_pnlExpanded');
+  const bodyHtml = start === -1 ? html : html.slice(html.indexOf('>', start) + 1, end === -1 ? undefined : html.lastIndexOf('<div', end));
+  const { text, history, authority_rcw } = splitHistory(toText(bodyHtml));
+
+  return {
+    found: true,
+    citation,
+    section: id,
+    title: cite.title,
+    chapter: `${cite.title}-${cite.chapter}`,
+    caption,
+    text,
+    text_chars: text.length,
+    history,
+    authority_rcw,
+    url,
+    pdf_url: `${url}&pdf=true`,
+    filings_url: `${WAC_FILINGS}${encodeURIComponent(id)}`,
+    data_as_of: new Date().toISOString(),
+    source: SOURCE,
+    attribution: ATTRIBUTION,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WAC: browse titles / chapters / sections
+// ---------------------------------------------------------------------------
+
+async function wacBrowse(args: Record<string, unknown>): Promise<unknown> {
+  const raw = String(args.cite ?? '').trim();
+  const data_as_of = new Date().toISOString();
+
+  if (!raw) {
+    const res = await pwFetch(WAC_HOME, { headers: { 'User-Agent': UA } });
+    if (!res.ok) throw new Error(`Washington Legislature returned HTTP ${res.status} for the WAC title index`);
+    const html = await res.text();
+    const titles: { title: string; agency: string; url: string }[] = [];
+    const re = /href="default\.aspx\?cite=(\d+[A-Z]?)">\s*Title\s*[\dA-Z]+\s*<\/a><\/td><td>([^<]*)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html))) {
+      titles.push({ title: m[1], agency: inline(m[2]), url: `${WAC_BASE}${m[1]}` });
+    }
+    if (titles.length === 0) throw new Error('WAC title index parsed to zero titles — the page layout has changed');
+    return { level: 'titles', count: titles.length, titles, url: WAC_HOME, data_as_of, source: SOURCE };
+  }
+
+  const cite = parseWac(raw);
+  if (!cite) return { found: false, reason: 'unparsed_cite', message: `"${raw}" is not a WAC title or chapter.`, hint: WAC_FORMAT_HINT };
+  if (cite.section) {
+    return {
+      found: false,
+      reason: 'is_a_section',
+      message: `"${citeString(cite)}" is a section. Call wa_wac_section for its text, or browse its chapter with {cite: "${cite.title}-${cite.chapter}"}.`,
+    };
+  }
+  const id = citeString(cite);
+  const url = `${WAC_BASE}${encodeURIComponent(id)}`;
+  const res = await pwFetch(url, { headers: { 'User-Agent': UA }, redirect: 'manual' });
+  if (res.status >= 300 && res.status < 400) {
+    return { found: false, reason: cite.chapter ? 'chapter_not_found' : 'title_not_found', cite: id, message: `No WAC ${id} (the site redirected instead of serving it).` };
+  }
+  if (!res.ok) throw new Error(`Washington Legislature returned HTTP ${res.status} for WAC ${id}`);
+  const html = await res.text();
+  const h1 = html.match(/<h1>([\s\S]*?)<\/h1>/);
+  const h2 = html.match(/<h2>([\s\S]*?)<\/h2>/);
+  const heading = h2 ? inline(h2[1]) : null;
+  const start = html.indexOf("<div id='contentWrapper'");
+  const body = start === -1 ? html : html.slice(start);
+
+  if (!cite.chapter) {
+    const chapters: { chapter: string; caption: string; url: string }[] = [];
+    const re = /cite=(\d+[A-Z]?-\d+[A-Z]?)'>[^<]*<\/a><\/td><td[^>]*>([\s\S]*?)<\/td>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(body))) chapters.push({ chapter: m[1], caption: inline(m[2]), url: `${WAC_BASE}${m[1]}` });
+    if (chapters.length === 0) {
+      return { found: false, reason: 'title_not_found', cite: id, message: `WAC Title ${id} lists no chapters — it does not exist, or every chapter has been repealed.`, url };
+    }
+    return { level: 'chapters', cite: id, heading: h1 ? inline(h1[1]) : `Title ${id} WAC`, agency: heading, count: chapters.length, chapters, url, data_as_of, source: SOURCE };
+  }
+
+  const sections: { section: string; caption: string; subheading: string | null; url: string }[] = [];
+  let subheading: string | null = null;
+  const rowRe = /<tr>([\s\S]*?)<\/tr>/g;
+  let r: RegExpExecArray | null;
+  while ((r = rowRe.exec(body))) {
+    const row = r[1];
+    const sub = row.match(/<td colspan="3"><div[^>]*>([\s\S]*?)<\/div>/);
+    if (sub) {
+      subheading = inline(sub[1]) || null;
+      continue;
+    }
+    const sec = row.match(/<td[^>]*>(\d+[A-Z]?-\d+[A-Z]?-\d+[A-Z]?)<\/td><td[^>]*>([\s\S]*?)<\/td>/);
+    if (sec) sections.push({ section: sec[1], caption: inline(sec[2]), subheading, url: `${WAC_BASE}${sec[1]}` });
+  }
+  if (sections.length === 0) {
+    return { found: false, reason: 'chapter_not_found', cite: id, message: `WAC chapter ${id} lists no sections — it does not exist, or the chapter has been repealed (see its dispositions page).`, url, dispositions_url: `${WAC_BASE}${id}&dispo=true` };
+  }
+  return {
+    level: 'sections',
+    cite: id,
+    heading: h1 ? inline(h1[1]) : `Chapter ${id} WAC`,
+    caption: heading,
+    count: sections.length,
+    sections,
+    url,
+    full_chapter_url: `${url}&full=true`,
+    data_as_of,
+    source: SOURCE,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WAC: full-text search (SearchUnify behind leg.wa.gov/search)
+// ---------------------------------------------------------------------------
+
+const SU_MARK = /___su-highlight-(?:start|end)___/g;
+
+function cleanHighlight(s: unknown): string {
+  return String(s ?? '').replace(SU_MARK, '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+async function refreshSuConfig(): Promise<boolean> {
+  const res = await pwFetch(SU_CLIENT_JS, { headers: { 'User-Agent': UA } }, 'leg.wa.gov search client');
+  if (!res.ok) return false;
+  const js = await res.text();
+  const search = js.match(/"search"\s*:\s*"(https:\/\/[^"]+)"/)?.[1];
+  const uid = js.match(/"uid"\s*:\s*"([0-9a-f-]{20,})"/)?.[1];
+  const accessToken = js.match(/"accessToken"\s*:\s*"([0-9a-f]{16,})"/)?.[1];
+  if (!search || !uid || !accessToken) return false;
+  const changed = search !== suConfig.search || uid !== suConfig.uid || accessToken !== suConfig.accessToken;
+  suConfig = { search, uid, accessToken };
+  return changed;
+}
+
+async function suSearch(query: string, size: number): Promise<{ status: number; body: any }> {
+  const payload = {
+    react: 1,
+    searchString: query,
+    from: 0,
+    sortby: '_score',
+    orderBy: 'desc',
+    pageNo: 1,
+    aggregations: [
+      { type: '_index', filter: ['1_7_wac'] },
+      { type: '_type', filter: ['wac'] },
+    ],
+    uid: suConfig.uid,
+    accessToken: suConfig.accessToken,
+    resultsPerPage: size,
+    exactPhrase: '',
+    withOneOrMore: '',
+    withoutTheWords: '',
+    pageSize: size,
+    sid: '',
+    language: 'en',
+    mergeSources: false,
+    versionResults: true,
+    showMoreSummary: false,
+    minSummaryLength: false,
+    suCaseCreate: false,
+  };
+  const res = await pwFetch(
+    `${suConfig.search}/search/searchResultByPost`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
+      body: JSON.stringify(payload),
+    },
+    'Washington Legislature search',
+  );
+  const text = await res.text();
+  let body: any = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = { raw: text.slice(0, 300) };
+  }
+  return { status: res.status, body };
+}
+
+const ARCHIVE_FILE_RE = /WAC\s+(\d+[A-Z]?)\s*-\s*(\d+[A-Z]?)\s*-\s*(\d+[A-Z]?)\.htm$/i;
+const ARCHIVE_CHAPTER_RE = /WAC\s+(\d+[A-Z]?)\s*-\s*(\d+[A-Z]?)\s+CHAPTER\.htm$/i;
+const ARCHIVE_TITLE_RE = /WAC\s+(\d+[A-Z]?)\s+TITLE\.htm$/i;
+
+async function wacSearch(args: Record<string, unknown>): Promise<unknown> {
+  const query = String(args.query ?? '').trim();
+  if (!query) throw new Error('query is required');
+  const limit = Math.max(1, Math.min(25, Number(args.limit) || 10));
+  const prefixCite = args.cite_prefix ? parseWac(args.cite_prefix) : null;
+  if (args.cite_prefix && !prefixCite) {
+    return { found: false, reason: 'unparsed_cite_prefix', message: `"${args.cite_prefix}" is not a WAC title or chapter.`, hint: WAC_FORMAT_HINT };
+  }
+  const prefix = prefixCite ? citeString(prefixCite) + '-' : null;
+  const size = prefix ? 50 : limit;
+
+  let { status, body } = await suSearch(query, size);
+  if (status !== 200 || body?.statusCode !== 200) {
+    // The public client token can rotate when the Legislature republishes its
+    // search client; re-read it from the bundle once and retry.
+    const changed = await refreshSuConfig();
+    if (changed) ({ status, body } = await suSearch(query, size));
+  }
+  if (status !== 200 || body?.statusCode !== 200) {
+    throw new Error(
+      `Washington Legislature search returned HTTP ${status}${body?.message ? ` (${String(body.message).slice(0, 120)})` : ''}. ` +
+        'The full-text index is the leg.wa.gov site search; wa_wac_browse (title → chapter → section captions) still works without it.',
+    );
+  }
+
+  const hits: any[] = body?.result?.hits ?? [];
+  const results = hits
+    .map((h) => {
+      const href = String(h.href ?? h._id ?? '');
+      let file = '';
+      try {
+        file = decodeURIComponent(href.split('/').pop() ?? '');
+      } catch {
+        file = href.split('/').pop() ?? '';
+      }
+      const hl = h.highlight ?? {};
+      const sec = file.match(ARCHIVE_FILE_RE);
+      const chap = file.match(ARCHIVE_CHAPTER_RE);
+      const ttl = file.match(ARCHIVE_TITLE_RE);
+      const citation = sec ? `${sec[1]}-${sec[2]}-${sec[3]}` : chap ? `${chap[1]}-${chap[2]}` : ttl ? ttl[1] : null;
+      const kind = sec ? 'section' : chap ? 'chapter' : ttl ? 'title' : 'other';
+      let caption = cleanHighlight(hl['CaptionsTitles.en']?.[0]);
+      const summary = cleanHighlight(hl['SummaryToDisplay']?.[0] ?? hl['1_7_wac___wac___Content.en']?.[0]);
+      if (!caption && citation) {
+        const cm = summary.match(new RegExp(`^(?:PDF\\s*)?WAC\\s+${citation.replace(/[-]/g, '\\-')}\\s+(.{3,160}?\\.)(?:\\s|$)`));
+        if (cm) caption = cm[1];
+      }
+      const snippets = (hl['Text.en'] ?? []).map(cleanHighlight).filter(Boolean);
+      const snippet = snippets.length ? snippets.join(' … ') : summary.replace(/^(?:PDF\s*)?WAC\s+[\dA-Z-]+\s*/, '');
+      return {
+        citation: citation ? `WAC ${citation}` : null,
+        cite: citation,
+        kind,
+        caption: caption || null,
+        snippet: snippet.slice(0, 600),
+        url: citation ? `${WAC_BASE}${citation}` : href,
+        score: typeof h._score === 'number' ? Math.round(h._score * 10) / 10 : null,
+      };
+    })
+    .filter((r) => !prefix || (r.cite ?? '').startsWith(prefix) || r.cite === prefix.slice(0, -1))
+    .slice(0, limit);
+
+  const total: number = Number(body?.result?.total ?? 0);
+  return {
+    query,
+    cite_prefix: prefix ? prefix.slice(0, -1) : null,
+    total_matches: prefix ? null : total,
+    total_matches_note: prefix
+      ? `Filtered client-side to WAC ${prefix.slice(0, -1)} from the top ${size} of ${total} index-wide matches; a chapter with many matches past rank ${size} is under-counted here.`
+      : 'Index-wide match count from the Legislature search; results are the top-scored ones.',
+    returned: results.length,
+    results,
+    ...(results.length === 0
+      ? { note: `The Legislature's WAC full-text index returned ${total} matches for "${query}"${prefix ? ` (none under WAC ${prefix.slice(0, -1)} in the top ${size})` : ''}. Try fewer or different words; agency rules use regulatory vocabulary ("employer", "licensee", "permittee").` }
+      : {}),
+    search_url: `https://leg.wa.gov/search?searchString=${encodeURIComponent(query)}&activeType=1_7_wac`,
+    data_as_of: new Date().toISOString(),
+    source: 'Washington State Legislature site search (SearchUnify index of lawfilesext.leg.wa.gov WAC files), keyless',
+    attribution: ATTRIBUTION,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WAC: archived section text by year
+// ---------------------------------------------------------------------------
+
+const FIRST_HTML_ARCHIVE_YEAR = 2019;
+const FIRST_ARCHIVE_YEAR = 2004; // lawfilesext holds scans back to 1977; the Legislature advertises 2004+
+
+/** Fixed-width archive name fields: numeric part right-aligned to 3, suffix letter appended, padded to 4. */
+function field(part: string): string {
+  const m = part.match(/^(\d+)([A-Z]?)$/);
+  const num = m ? m[1] : part;
+  const suffix = m ? m[2] : '';
+  return (num.padStart(3, ' ') + suffix).padEnd(4, ' ');
+}
+
+function archiveCandidates(year: number, c: Required<WacCite>): string[] {
+  const t = field(c.title);
+  const ch = field(c.chapter);
+  const titleDir = `WAC ${t} TITLE`;
+  const chapterDir = `WAC ${t}-${ch} CHAPTER`;
+  const file = `WAC ${t}-${ch}-${c.section}.htm`;
+  const enc = (s: string) => s.split('/').map(encodeURIComponent).join('/');
+  // 2019–2023: nested by title; 2024+: flat by chapter. Try the likely one first.
+  const nested = `${WAC_ARCHIVE}${year}/htm/${enc(titleDir)}/${enc(chapterDir)}/${enc(file)}`;
+  const flat = `${WAC_ARCHIVE}${year}/htm/${enc(chapterDir)}/${enc(file)}`;
+  return year >= 2024 ? [flat, nested] : [nested, flat];
+}
+
+async function wacArchivedSection(args: Record<string, unknown>): Promise<unknown> {
+  const cite = parseWac(args.section);
+  if (!cite || !cite.section || !cite.chapter) {
+    return { found: false, reason: 'unparsed_section', message: `"${args.section}" is not a WAC section citation.`, hint: WAC_FORMAT_HINT };
+  }
+  const year = Number(args.year);
+  const thisYear = new Date().getUTCFullYear();
+  if (!Number.isInteger(year) || year < FIRST_ARCHIVE_YEAR || year >= thisYear) {
+    return {
+      found: false,
+      reason: 'year_out_of_range',
+      message: `year must be an integer from ${FIRST_ARCHIVE_YEAR} to ${thisYear - 1}; the archive is a year-end snapshot, so the current year is wa_wac_section.`,
+      html_years: `${FIRST_HTML_ARCHIVE_YEAR}–${thisYear - 1}`,
+      pdf_only_years: `${FIRST_ARCHIVE_YEAR}–${FIRST_HTML_ARCHIVE_YEAR - 1}`,
+    };
+  }
+  const id = citeString(cite);
+  const full = cite as Required<WacCite>;
+  const data_as_of = new Date().toISOString();
+
+  if (year < FIRST_HTML_ARCHIVE_YEAR) {
+    // Scanned/printed volumes only. 2016–2018 carry a per-chapter PDF whose
+    // name follows the fixed-width scheme; earlier years are supplements and
+    // bound volumes with no per-chapter file, so point at the year directory.
+    const pdfName = `WAC ${field(full.title)}-${field(full.chapter)} CHAPTER.pdf`;
+    const pdfUrl = `${WAC_ARCHIVE}${year}/${encodeURIComponent(pdfName)}`;
+    let chapter_pdf_url: string | null = null;
+    if (year >= 2016) {
+      const head = await pwFetch(pdfUrl, { method: 'HEAD', headers: { 'User-Agent': UA } });
+      if (head.ok) chapter_pdf_url = pdfUrl;
+    }
+    return {
+      found: false,
+      reason: 'pdf_only_year',
+      section: id,
+      year,
+      message: `The ${year} WAC archive is published as PDF only; this tool returns text for ${FIRST_HTML_ARCHIVE_YEAR} onward.`,
+      chapter_pdf_url,
+      archive_directory_url: `${WAC_ARCHIVE}${year}/`,
+      hint: `wa_wac_filings({cite: "${id}"}) lists every WSR rule-making filing that changed this section, with dates, which usually answers "what did it say in ${year}" without the scan.`,
+      data_as_of,
+      source: SOURCE,
+    };
+  }
+
+  const tried: string[] = [];
+  for (const url of archiveCandidates(year, full)) {
+    tried.push(url);
+    const res = await pwFetch(url, { headers: { 'User-Agent': UA } }, 'Washington WAC archive');
+    if (res.status === 404) continue;
+    if (!res.ok) throw new Error(`Washington WAC archive returned HTTP ${res.status} for ${url}`);
+    const html = await res.text();
+    const citation = fieldOf(html, 'Citations') ?? `WAC ${id}`;
+    const caption = fieldOf(html, 'CaptionsTitles');
+    const textField = html.match(/<!-- field: Text -->([\s\S]*?)(?:<div[^>]*>\[<!-- field: History -->|<\/body>)/);
+    const text = toText(textField ? textField[1] : html);
+    const history = fieldOf(html, 'History');
+    const authority_rcw = Array.from(new Set((history ?? '').match(/\b\d+[A-Z]?\.\d+[A-Z]?\.\d+\b/g) ?? []));
+    return {
+      found: true,
+      citation,
+      section: id,
+      year,
+      archive: `Washington Administrative Code ${year} Archive (year-end snapshot)`,
+      caption,
+      text,
+      text_chars: text.length,
+      history,
+      authority_rcw,
+      url,
+      current_url: `${WAC_BASE}${id}`,
+      data_as_of,
+      source: SOURCE,
+      attribution: ATTRIBUTION,
+    };
+  }
+  return {
+    found: false,
+    reason: 'section_not_in_archive',
+    section: id,
+    year,
+    message: `WAC ${id} is not in the ${year} archive (HTTP 404 at both layouts). Either the section did not exist at the end of ${year}, or it was numbered differently then.`,
+    tried,
+    hint: `wa_wac_filings({cite: "${id}"}) shows when the section was adopted or renumbered; wa_wac_section returns the current text.`,
+    data_as_of,
+    source: SOURCE,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WAC: WSR rule-making filings affecting a section or chapter
+// ---------------------------------------------------------------------------
+
+async function wacFilings(args: Record<string, unknown>): Promise<unknown> {
+  const cite = parseWac(args.cite);
+  if (!cite || !cite.chapter) {
+    return { found: false, reason: 'unparsed_cite', message: `"${args.cite}" is not a WAC section or chapter citation.`, hint: WAC_FORMAT_HINT };
+  }
+  const id = citeString(cite);
+  const url = `${WAC_FILINGS}${encodeURIComponent(id)}`;
+  const res = await pwFetch(url, { headers: { 'User-Agent': UA }, redirect: 'manual' });
+  if (res.status >= 300 && res.status < 400) {
+    return { found: false, reason: 'cite_not_found', cite: id, message: `The filings page redirected instead of listing WAC ${id} (HTTP ${res.status}).` };
+  }
+  if (!res.ok) throw new Error(`Washington Legislature returned HTTP ${res.status} for WAC ${id} filings`);
+  const html = await res.text();
+  const filings: { wsr: string; type: string; filed: string; url: string }[] = [];
+  const re = /<a[^>]*href='([^']*law\/wsr\/[^']*)'>\s*([\d-]+)\s*<\/a>\s*<\/td>\s*<td>\s*([\s\S]*?)\s*<\/td>\s*<td>\s*([\d/]+)\s*<\/td>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    filings.push({ wsr: m[2].trim(), type: inline(m[3]), filed: m[4].trim(), url: m[1] });
+  }
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
+  return {
+    citation: h1 ? inline(h1[1]) : `WAC ${id}`,
+    cite: id,
+    level: cite.section ? 'section' : 'chapter',
+    count: filings.length,
+    filings,
+    ...(filings.length === 0
+      ? { note: `The Legislature lists no Washington State Register filings for WAC ${id}. For a valid cite that means no agency rule-making has touched it since the WSR index began; for an unknown cite the page is simply empty — confirm with wa_wac_section or wa_wac_browse.` }
+      : {}),
+    url,
+    data_as_of: new Date().toISOString(),
+    source: SOURCE,
+    attribution: ATTRIBUTION,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+const tools: McpToolExport['tools'] = [
+  {
+    name: 'wa_rcw_section',
+    description:
+      'Get the FULL TEXT of a section of the Revised Code of Washington (RCW) — Washington state STATUTES — by citation. "RCW 9A.32.030" is first degree murder. Returns the statutory text and its heading. Keyless. Use for "what does RCW 46.61.502 say", "text of RCW 49.60.180", or to check a Washington statute a case relies on. For agency RULES (Washington Administrative Code, citations like "WAC 296-800-110") use wa_wac_section instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        section: { type: 'string', description: 'RCW citation, e.g. "9A.32.030" or "46.61.502". Title.chapter.section.' },
+      },
+      required: ['section'],
+    },
+  },
+  {
+    name: 'wa_wac_section',
+    description:
+      'Get the CURRENT FULL TEXT of a section of the Washington Administrative Code (WAC) — Washington state agency RULES / regulations — by citation. "WAC 296-800-110" is L&I\'s safe-workplace summary; "458-20-178" is the Department of Revenue use-tax rule. Returns the rule text, its caption, the statutory-authority history (every WSR filing that amended it, with filed/effective dates) and the RCW sections the agency cited as authority. A repealed or nonexistent section is reported as found:false (the site redirects it). Keyless. Use for "what does WAC 296-800-110 say", "text of WAC 388-76-10000", or to check a Washington regulation an agency decision cites. For STATUTES (RCW) use wa_rcw_section; for past years use wa_wac_archived_section; to search by topic use wa_wac_search.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        section: { type: 'string', description: 'WAC citation, title-chapter-section, e.g. "296-800-110" or "WAC 458-20-178". Chapter and title parts may carry a letter suffix ("296-14A-100", "132C-120-010").' },
+      },
+      required: ['section'],
+    },
+  },
+  {
+    name: 'wa_wac_search',
+    description:
+      'Search the FULL TEXT of the Washington Administrative Code (WAC) by topic or keyword — "workplace safety bulletin board", "security deposit", "septic system permit", "cannabis retailer". Calls the Washington State Legislature\'s own full-text search index of every WAC section (it matches rule TEXT, not just captions), returns matching citations with captions, highlighted snippets and the index-wide match count. Optionally restrict to a title or chapter with cite_prefix ("296" for L&I, "458-20" for Revenue excise-tax rules). Call wa_wac_section with a citation for the full text and history. Keyless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Topic or keywords, e.g. "safety bulletin board" or "landlord deposit". Plain words; the index is Elasticsearch-style (all terms, stemmed).' },
+        limit: { type: 'number', description: 'Max results to return, default 10, max 25.' },
+        cite_prefix: { type: 'string', description: 'Optional WAC title or chapter to restrict results to, e.g. "296" or "296-800".' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'wa_wac_browse',
+    description:
+      'Browse the structure of the Washington Administrative Code (WAC): with no cite, lists every WAC TITLE with the agency it belongs to (Title 296 = Labor and Industries, 458 = Revenue, 388 = Social and Health Services, 173 = Ecology, 246 = Health); with a title ("296") lists its CHAPTERS with captions; with a chapter ("296-800") lists its SECTIONS with captions and subheadings. Use to find which chapter covers a topic before calling wa_wac_section, or to enumerate every rule in a chapter. Keyless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cite: { type: 'string', description: 'Omit for all titles; a title number ("296") for its chapters; a chapter ("296-800") for its sections.' },
+      },
+    },
+  },
+  {
+    name: 'wa_wac_archived_section',
+    description:
+      'Get the text of a Washington Administrative Code (WAC) section AS IT STOOD at the end of a PAST YEAR, from the Legislature\'s annual WAC archive. Year-end snapshots with full text for 2019 onward (e.g. "WAC 296-800-110 in 2020"); 2004–2018 are PDF-only and the tool returns the chapter PDF link for 2016–2018 and the archive directory for earlier years rather than text. Returns the archived text, caption and the history line as printed that year, so you can diff it against wa_wac_section (current). Keyless. Use for "what did WAC 314-55-010 say in 2021", or to check which version of a rule applied on a date.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        section: { type: 'string', description: 'WAC section citation, e.g. "296-800-110".' },
+        year: { type: 'number', description: 'Archive year, 2004–last year. Full text for 2019 onward; PDF-only before that.' },
+      },
+      required: ['section', 'year'],
+    },
+  },
+  {
+    name: 'wa_wac_filings',
+    description:
+      'List the Washington State Register (WSR) rule-making FILINGS that affected a Washington Administrative Code (WAC) section or chapter — the amendment history as agency actions: WSR number, filing type (Permanent Rule, Proposal Original Notice, Emergency Rule, Expedited Rule Making, Preproposal Statement of Inquiry…), date filed, and a link to the filing text. Newest first. Use for "when was WAC 296-800-110 last amended", "is there a pending proposal to change chapter 458-20 WAC", or to trace a rule\'s rule-making record. Keyless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cite: { type: 'string', description: 'WAC section ("296-800-110") or chapter ("296-800").' },
+      },
+      required: ['cite'],
+    },
+  },
+];
+
+async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  switch (name) {
+    case 'wa_rcw_section':
+      return rcwSection(args);
+    case 'wa_wac_section':
+      return wacSection(args);
+    case 'wa_wac_search':
+      return wacSearch(args);
+    case 'wa_wac_browse':
+      return wacBrowse(args);
+    case 'wa_wac_archived_section':
+      return wacArchivedSection(args);
+    case 'wa_wac_filings':
+      return wacFilings(args);
+    default:
+      throw new Error(`Unknown tool: ${name}`);
+  }
 }
 
 export default { tools, callTool, meter: { credits: 1 } } satisfies McpToolExport;
