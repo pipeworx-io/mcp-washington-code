@@ -1,11 +1,13 @@
-# Washington Code — RCW statutes and WAC agency rules
+# Washington Code — RCW statutes, WAC agency rules, and bill tracking
 
-Washington state law from the Legislature's own site, keyless: the **Revised
-Code of Washington** (RCW, statutes) by citation, and the **Washington
-Administrative Code** (WAC, agency rules) by citation, by topic, by structure,
-by year-end archive, and by rule-making history.
+Washington state law and legislative activity from the Legislature's own
+sources, keyless: the **Revised Code of Washington** (RCW, statutes) by
+citation, the **Washington Administrative Code** (WAC, agency rules) by
+citation, by topic, by structure, by year-end archive, and by rule-making
+history, and **legislative bills** — status, amendments and floor votes — by
+bill number and biennium.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1715+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1857+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
@@ -17,10 +19,16 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 | `wa_wac_browse({cite?})` | Structure: no cite → every WAC title with its agency; a title ("296") → its chapters; a chapter ("296-800") → its sections with captions and subheadings. |
 | `wa_wac_archived_section({section, year})` | Text of a WAC rule AS IT STOOD at the end of a past year (full text 2019 onward; PDF-only 2004–2018, see below). |
 | `wa_wac_filings({cite})` | Every Washington State Register (WSR) rule-making filing that touched a section or chapter — number, type, date filed, link — newest first. |
+| `wa_bill_status({bill: "HB 1002", biennium?})` | Current status, description, legal title, sponsor list, introduced date and companion bills for a legislative bill. |
+| `wa_bill_amendments({bill, biennium?})` | Every amendment proposed to a bill — sponsor, floor action (ADOPTED/FAILED/WITHDRAWN), date, text links — most recent first. |
+| `wa_bill_votes({bill, biennium?})` | Recorded floor roll-call votes on a bill — motion, chamber, date, yea/nay/absent/excused counts and the voting legislators. |
+| `wa_session_bills({biennium?, status?, agency?, limit?, offset?})` | Bills for a biennium filtered by procedural status (introduced, passed_house/senate/legislature, signed/vetoed/partial_veto by the Governor), with aggregate counts first. |
 
 Citations accept the `RCW`/`WAC` prefix, letter-suffixed titles and chapters
-(`296-14A-100`, `132C-120-010`), and typographic dashes. Every response carries
-`data_as_of`, `source` and the exact upstream `url`.
+(`296-14A-100`, `132C-120-010`), and typographic dashes. Bill numbers accept
+any chamber/version prefix (`HB 1000`, `SHB 1000`, `2SHB 1000`, bare `1000`).
+Every response carries `data_as_of`, `source` and (for RCW/WAC) the exact
+upstream `url`.
 
 ## The four capabilities, and which one is only partly there
 
@@ -42,6 +50,35 @@ Citations accept the `RCW`/`WAC` prefix, letter-suffixed titles and chapters
 - **Anything else that is not a 200 throws a loud error naming the upstream
   status.** A transport failure is never reshaped into `found:false`
   (`src/index.test.ts` pins this — the oklahoma-code lesson, fleet #2742).
+- **Bills:** a nonexistent bill number/biennium combination answers **HTTP
+  200 with an empty array** — there is no 404 or error panel for this case.
+  `wa_bill_status` reads zero records as `found:false, reason:"bill_not_found"`.
+  `wa_bill_amendments` and `wa_bill_votes` read an empty list as a normal
+  zero-result answer (a bill can genuinely have no amendments or no recorded
+  roll call), not a miss — the note says so and points at `wa_bill_status` to
+  confirm the bill itself exists.
+
+## Bill tracking (added fleet #3240)
+
+Reads directly from the Washington State Legislature's own bill-tracking web
+service — not a third-party aggregator (LegiScan/OpenStates already cover all
+50 states generically; this is the Legislature's own free data for Washington
+specifically). Bills are addressed by **(biennium, bill number)**: Washington
+runs a two-year biennium starting on an odd year (`"2025-26"`), and bill
+numbers are reassigned each biennium, so the same number is a different bill
+two years later. All four tools default to the current biennium when omitted.
+
+`wa_session_bills`'s `status` filter and what each needs:
+
+| status | agency required? | What it lists |
+|---|---|---|
+| `introduced` (default) | no | Every bill filed in the biennium (merges the Legislature's per-calendar-year listing across the two years). |
+| `passed_house` / `passed_senate` / `passed_legislature` | no | Bills that passed that chamber / both chambers. |
+| `signed` / `vetoed` / `partial_veto` | yes (`House` or `Senate` — chamber of **origin**) | Governor's action, by the bill's chamber of origin. |
+
+`wa_session_bills` and the bulk Legislature listings it wraps carry no
+description field — only id, type, chamber and active flag. Call
+`wa_bill_status` on a specific bill id for its description and current status.
 
 ## Archive filenames are fixed-width (measured 2026-10-07)
 
@@ -97,6 +134,20 @@ lh112524p.searchunify.com/search/searchResultByPost      200   11,313 matches fo
 136 sections, `wa_wac_archived_section 296-800-110 @2020` 1,386 chars,
 `wa_wac_filings 296-800-110` 4 WSR filings.
 
+## Smoke — bill tracking (pre-deploy, 2026-10-18)
+
+All four bill tools returned non-empty live payloads against the current
+(2025-26) biennium: `wa_bill_status({bill:"HB 1002"})` → status "H Rules 3C",
+10 sponsors; `wa_bill_amendments({bill:"1002", biennium:"2023-24"})` → 1
+amendment, ADOPTED 2023-04-05; `wa_bill_votes({bill:"HB 1002"})` → House 3rd
+Reading vote, 70 yea / 24 nay / 4 excused, 2026-02-10;
+`wa_session_bills({biennium:"2025-26", status:"passed_legislature"})` → 709
+bills (397 House / 312 Senate); `wa_session_bills({..., status:"signed",
+agency:"House"})` → 385 bills. The miss case
+(`wa_bill_status({bill:"99999", biennium:"2025-26"})`) returned
+`found:false, reason:"bill_not_found"` from a genuine empty-array upstream
+response, not a guess.
+
 ## Caveats
 
 - RCW and WAC numbers are not contiguous; repealed and recodified sections are
@@ -108,9 +159,10 @@ lh112524p.searchunify.com/search/searchResultByPost      200   11,313 matches fo
 ## Data source
 
 Washington State Legislature — `app.leg.wa.gov` (current RCW and WAC, WSR
-filings), `lawfilesext.leg.wa.gov` (annual WAC archive), and the Legislature's
-site-search index. Keyless. Washington statutes and agency rules are public
-record.
+filings), `lawfilesext.leg.wa.gov` (annual WAC archive), the Legislature's
+site-search index, and the Legislature's own legislative bill-tracking data
+(status, amendments, sponsors, floor votes). Keyless. Washington statutes,
+agency rules and legislative bill records are public record.
 
 ## Quick Start
 
@@ -156,7 +208,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1715+ data sources. The
+Both URLs reach the same gateway and the same 1857+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
@@ -170,10 +222,12 @@ curl -X POST https://gateway.pipeworx.io/v1/tools/wa_rcw_section \
 
 No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/wa_rcw_section`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
 
-## Standalone (no gateway account)
+## Run it from npm
 
-This package also runs as a local stdio MCP server — no Pipeworx account, no
-gateway round-trip:
+`@pipeworx/mcp-washington-code` is a local stdio bridge to the Pipeworx gateway: your MCP client
+starts it with `npx`, and it forwards every call to the same
+`https://gateway.pipeworx.io/washington-code/mcp` endpoint shown above. It needs network access;
+there is no offline mode.
 
 ```json
 {
@@ -186,15 +240,18 @@ gateway round-trip:
 }
 ```
 
-Or run it directly to confirm it starts:
+Without a key it calls anonymously, capped at 50 calls a day. A free account
+raises that to 200 a day: get a key at https://pipeworx.io/signup and add
+`"env": { "PIPEWORX_API_KEY": "<your key>" }` to the server entry.
+The key is sent as a Bearer token, the same way a hosted connection sends it,
+so calls are metered and billed exactly as they are there.
 
-```bash
-npx -y @pipeworx/mcp-washington-code
-```
+It lists **only** this pack's tools by default. Set `PIPEWORX_META_TOOLS=1` to
+also list `ask_pipeworx` and the other gateway-wide tools.
 
-It speaks MCP over stdin/stdout and answers `initialize`/`tools/list`/`tools/call`
-for **only** this pack's tools — none of the shared meta-tools the gateway
-connection above adds. Same source, same tools, no ask_pipeworx routing.
+Behind an HTTPS proxy: Node's built-in `fetch` does not read `HTTPS_PROXY` by
+default. Newer Node releases honour it when `NODE_USE_ENV_PROXY=1` is set; check
+your Node version's documentation.
 
 ## Using with ask_pipeworx
 
