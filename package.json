@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-washington-code",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Washington state law: the Revised Code of Washington (RCW, statutes), the Washington Administrative Code (WAC, agency rules), and — added for fleet #3240 — bill status, amendments and floor votes from the Legislature's own bill-tracking web service.",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "mode": "gateway",
     "slug": "washington-code",
     "gatewaySlug": "washington-code",
-    "sourceHash": "v1-f8cad3b351baba0481d2d1aa423cd9f1f862407092ea4cd006b964b596b10cd1",
-    "sourceCommit": "98853f34516646cb7c4c1460f09249b262c0269e"
+    "sourceHash": "v1-d2f90da6c6e2e7f5ce415865baa77c2d5620a3808f56940d7a2eb664b9d2f448",
+    "sourceCommit": "ca52e7ed1e1ccad897c2da1b0fa105edc0bc3b2e"
   }
 }
